@@ -620,6 +620,37 @@ jobs:
           grep -n 'IOS_DEPLOYMENT_TARGET:-' ios/scripts/build-core-ios.sh
           grep -c "iOS14Compat.swift" ios/DukeX/DukeX.xcodeproj/project.pbxproj
 
+      - name: Fix FATX timestamp type-check (split long expressions)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("ios/DukeX/DukeX/Services/CloudSaves/FATXHDDCloudSaveStore.swift")
+          s = p.read_text()
+          old = (
+              "        let date = UInt16(((year - 1980) << 9) | ((components.month ?? 1) << 5) | (components.day ?? 1))\n"
+              "        let time = UInt16(((components.hour ?? 0) << 11) | ((components.minute ?? 0) << 5) | ((components.second ?? 0) / 2))\n"
+          )
+          new = (
+              "        let yearPart: Int = (year - 1980) << 9\n"
+              "        let monthPart: Int = (components.month ?? 1) << 5\n"
+              "        let dayPart: Int = components.day ?? 1\n"
+              "        let date = UInt16(truncatingIfNeeded: yearPart | monthPart | dayPart)\n"
+              "        let hourPart: Int = (components.hour ?? 0) << 11\n"
+              "        let minutePart: Int = (components.minute ?? 0) << 5\n"
+              "        let secondPart: Int = (components.second ?? 0) / 2\n"
+              "        let time = UInt16(truncatingIfNeeded: hourPart | minutePart | secondPart)\n"
+          )
+          if new in s:
+              print("FATX timestamp already fixed - nothing to do.")
+          elif old in s:
+              p.write_text(s.replace(old, new))
+              print("FATX timestamp fixed.")
+          else:
+              print("::error::FATX timestamp lines not found in " + str(p))
+              sys.exit(1)
+          PY
+
       - name: Select Xcode
         run: |
           set -e
