@@ -35,10 +35,10 @@ on:
         required: false
         default: "v1.3.0"
         type: string
-      vcpkg_packages:
-        description: "vcpkg ports for arm64-ios (space separated)"
+      glib_version:
+        description: "glib version pinned via vcpkg manifest override (2.90 fails its frexpl check on iOS cross builds)"
         required: false
-        default: "zlib libpng pixman glib libsamplerate libepoxy sdl3 curl"
+        default: "2.82.2"
         type: string
 
 permissions:
@@ -620,37 +620,6 @@ jobs:
           grep -n 'IOS_DEPLOYMENT_TARGET:-' ios/scripts/build-core-ios.sh
           grep -c "iOS14Compat.swift" ios/DukeX/DukeX.xcodeproj/project.pbxproj
 
-      - name: Fix FATX timestamp type-check (split long expressions)
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, sys
-          p = pathlib.Path("ios/DukeX/DukeX/Services/CloudSaves/FATXHDDCloudSaveStore.swift")
-          s = p.read_text()
-          old = (
-              "        let date = UInt16(((year - 1980) << 9) | ((components.month ?? 1) << 5) | (components.day ?? 1))\n"
-              "        let time = UInt16(((components.hour ?? 0) << 11) | ((components.minute ?? 0) << 5) | ((components.second ?? 0) / 2))\n"
-          )
-          new = (
-              "        let yearPart: Int = (year - 1980) << 9\n"
-              "        let monthPart: Int = (components.month ?? 1) << 5\n"
-              "        let dayPart: Int = components.day ?? 1\n"
-              "        let date = UInt16(truncatingIfNeeded: yearPart | monthPart | dayPart)\n"
-              "        let hourPart: Int = (components.hour ?? 0) << 11\n"
-              "        let minutePart: Int = (components.minute ?? 0) << 5\n"
-              "        let secondPart: Int = (components.second ?? 0) / 2\n"
-              "        let time = UInt16(truncatingIfNeeded: hourPart | minutePart | secondPart)\n"
-          )
-          if new in s:
-              print("FATX timestamp already fixed - nothing to do.")
-          elif old in s:
-              p.write_text(s.replace(old, new))
-              print("FATX timestamp fixed.")
-          else:
-              print("::error::FATX timestamp lines not found in " + str(p))
-              sys.exit(1)
-          PY
-
       - name: Select Xcode
         run: |
           set -e
@@ -716,21 +685,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: vcpkg-arm64-ios14-${{ hashFiles('.github/workflows/ios14-build.yml') }}-${{ inputs.vcpkg_packages }}
+          key: vcpkg-arm64-ios14-${{ hashFiles('.github/workflows/ios14-build.yml') }}-${{ inputs.glib_version }}
           restore-keys: vcpkg-arm64-ios14-
 
       - name: vcpkg arm64-ios dependencies (deployment target 14.0)
         if: inputs.stage == 'full-ipa'
         env:
-          VCPKG_PACKAGES: ${{ inputs.vcpkg_packages }}
+          GLIB_VERSION: ${{ inputs.glib_version }}
         run: |
           set -uo pipefail
           mkdir -p logs "$HOME/.cache/vcpkg/archives"
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          # Full clone: manifest "overrides" need the version database history.
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          BASELINE="$(git -C "$HOME/vcpkg" rev-parse HEAD)"
 
-          # Overlay triplet: same name as the community one, but pinned to iOS 14.0 so the
-          # static libs do not require a newer iOS than the app targets.
+          # Overlay triplet: same name as the community one, pinned to iOS 14.0.
           mkdir -p "$HOME/triplets"
           cat > "$HOME/triplets/arm64-ios.cmake" <<'TRIPLET'
           set(VCPKG_TARGET_ARCHITECTURE arm64)
@@ -744,22 +714,46 @@ jobs:
           TRIPLET
           sed -i '' -E 's/^ {10}//' "$HOME/triplets/arm64-ios.cmake"
 
+          # Manifest: libepoxy WITHOUT default features (the egl/x11 features do not build on
+          # iOS; xemu only needs epoxy's GL headers/dispatch, rendering goes through Vulkan),
+          # glib pinned to a version whose gnulib frexpl probe works in iOS cross builds.
+          mkdir -p "$HOME/manifest"
+          cat > "$HOME/manifest/vcpkg.json" <<EOF
+          {
+            "name": "dukex-ios-deps",
+            "version": "0.0.0",
+            "builtin-baseline": "${BASELINE}",
+            "dependencies": [
+              "zlib",
+              "libpng",
+              "pixman",
+              "glib",
+              "libsamplerate",
+              { "name": "libepoxy", "default-features": false },
+              "sdl3",
+              "curl"
+            ],
+            "overrides": [
+              { "name": "glib", "version": "${GLIB_VERSION}" }
+            ]
+          }
+          EOF
+          sed -i '' -E 's/^ {10}//' "$HOME/manifest/vcpkg.json"
+          cat "$HOME/manifest/vcpkg.json"
+
           export VCPKG_DEFAULT_BINARY_CACHE="$HOME/.cache/vcpkg/archives"
-          FAILED=""
-          for p in $VCPKG_PACKAGES; do
-            echo "::group::vcpkg install $p:arm64-ios"
-            if ! "$HOME/vcpkg/vcpkg" install "$p:arm64-ios" \
-                  --overlay-triplets="$HOME/triplets" --clean-after-build \
-                  2>&1 | tee -a logs/vcpkg.log; then
-              FAILED="$FAILED $p"
-              echo "::warning::vcpkg port failed: $p"
-            fi
-            echo "::endgroup::"
-          done
-          if [ -n "$FAILED" ]; then
-            echo "::error::vcpkg ports failed:$FAILED (see logs/vcpkg.log and vcpkg buildtrees in artifacts)"
+          "$HOME/vcpkg/vcpkg" install \
+            --triplet arm64-ios \
+            --overlay-triplets="$HOME/triplets" \
+            --x-manifest-root="$HOME/manifest" \
+            --x-install-root="$HOME/vcpkg/installed" \
+            --clean-after-build 2>&1 | tee logs/vcpkg.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::vcpkg install failed:"
+            grep -E "^error:|BUILD_FAILED|no version database entry|version conflict|ERROR:" logs/vcpkg.log | sort -u | head -20
             mkdir -p logs/vcpkg-buildtrees
-            find "$HOME/vcpkg/buildtrees" -name '*.log' -path '*arm64-ios*' -exec cp {} logs/vcpkg-buildtrees/ \; 2>/dev/null || true
+            find "$HOME/vcpkg/buildtrees" -name '*.log' -exec cp {} logs/vcpkg-buildtrees/ \; 2>/dev/null || true
             exit 1
           fi
           ls "$HOME/vcpkg/installed/arm64-ios/lib/pkgconfig" || true
