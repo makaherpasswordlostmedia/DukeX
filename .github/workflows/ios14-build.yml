@@ -36,9 +36,9 @@ on:
         default: "v1.3.0"
         type: string
       glib_max_version:
-        description: "Newest glib to allow (picked automatically from the vcpkg version database; glib 2.90 fails its frexpl check on iOS cross builds)"
+        description: "Newest glib to allow (picked automatically from the vcpkg version database)"
         required: false
-        default: "2.82"
+        default: "2.76"
         type: string
 
 permissions:
@@ -727,23 +727,43 @@ jobs:
           # port-version (entries look like 2.82.2#1).
           mkdir -p "$HOME/manifest"
           BASELINE="$BASELINE" GLIB_MAX="$GLIB_MAX" python3 - <<'PY'
-          import json, os, re
+          import json, os, re, pathlib, subprocess
           root = os.path.expanduser("~/vcpkg")
-          path = os.path.join(root, "versions", "g-", "glib.json")
-          entries = json.load(open(path))["versions"]
+          entries = json.load(open(os.path.join(root, "versions", "g-", "glib.json")))["versions"]
           def ver(e):
               return e.get("version") or e.get("version-semver") or e.get("version-string") or e.get("version-date")
           def key(v):
               return tuple(int(x) for x in re.findall(r"\d+", v.split("-")[0])[:3])
           limit = tuple(int(x) for x in os.environ["GLIB_MAX"].split("."))
-          print("glib versions in database (newest first):", [f"{ver(e)}#{e.get('port-version', 0)}" for e in entries[:14]])
+          print("glib versions in database (newest first):", [f"{ver(e)}#{e.get('port-version', 0)}" for e in entries[:16]])
           chosen = next((e for e in entries if key(ver(e))[:len(limit)] <= limit), None)
           if chosen is None:
               raise SystemExit("no glib <= %s in the vcpkg version database" % os.environ["GLIB_MAX"])
-          override = {"name": "glib", "version": ver(chosen)}
-          if chosen.get("port-version", 0):
-              override["port-version"] = chosen["port-version"]
-          print("glib override:", override)
+          print("glib chosen:", ver(chosen), "port-version", chosen.get("port-version", 0), "git-tree", chosen["git-tree"])
+
+          # Extract exactly that port version into an overlay port and patch it.
+          ov = pathlib.Path(os.path.expanduser("~/overlay-ports/glib"))
+          ov.mkdir(parents=True, exist_ok=True)
+          tar = subprocess.run(["git", "-C", root, "archive", chosen["git-tree"]], stdout=subprocess.PIPE, check=True).stdout
+          subprocess.run(["tar", "-x", "-C", str(ov)], input=tar, check=True)
+          pf = ov / "portfile.cmake"
+          s = pf.read_text()
+          hack = """
+          # --- DukeX: iOS cross build ---
+          # glib's gnulib check for frexpl() RUNS a test binary. An iOS arm64 binary cannot run on the
+          # macOS build host, so meson wrongly concludes frexpl is broken and aborts. frexpl exists in
+          # the iOS libm, so downgrade that error() to a warning().
+          foreach(_q "'" "\\"")
+              vcpkg_replace_string("${SOURCE_PATH}/glib/gnulib/meson.build"
+                  "error(${_q}frexpl()" "warning(${_q}frexpl()" IGNORE_UNCHANGED)
+          endforeach()
+          # --- end DukeX ---
+
+          """
+          i = s.index("vcpkg_configure_meson(")
+          pf.write_text(s[:i] + hack + s[i:])
+          print("overlay port ready:", sorted(x.name for x in ov.iterdir()))
+
           manifest = {
               "name": "dukex-ios-deps",
               "version": "0.0.0",
@@ -753,9 +773,9 @@ jobs:
                   {"name": "libepoxy", "default-features": False},
                   "sdl3", "curl",
               ],
-              "overrides": [override],
           }
           json.dump(manifest, open(os.path.expanduser("~/manifest/vcpkg.json"), "w"), indent=2)
+
           PY
           sed -i '' -E 's/^ {10}//' "$HOME/manifest/vcpkg.json" 2>/dev/null || true
           cat "$HOME/manifest/vcpkg.json"
@@ -764,6 +784,7 @@ jobs:
           "$HOME/vcpkg/vcpkg" install \
             --triplet arm64-ios \
             --overlay-triplets="$HOME/triplets" \
+            --overlay-ports="$HOME/overlay-ports" \
             --x-manifest-root="$HOME/manifest" \
             --x-install-root="$HOME/vcpkg/installed" \
             --clean-after-build 2>&1 | tee logs/vcpkg.log
