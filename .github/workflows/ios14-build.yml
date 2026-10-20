@@ -799,13 +799,17 @@ jobs:
               if a in t:
                   t = t.replace(a, "#include <TargetConditionals.h>\n#if !TARGET_OS_IPHONE\n#include <libproc.h>\n#endif")
                   n += 1
+              c = "#include <sys/proc_info.h>"
+              if c in t:
+                  t = t.replace(c, "#if !TARGET_OS_IPHONE\n#include <sys/proc_info.h>\n#endif")
+                  n += 1
               b = "#if defined(__APPLE__)\n  /* proc_pidinfo isn't documented"
               if b in t:
                   t = t.replace(b, "#if defined(__APPLE__) && !TARGET_OS_IPHONE\n  /* proc_pidinfo isn't documented")
                   n += 1
               open(gs, "w", encoding="utf-8").write(t)
-              print("gspawn.c libproc replacements:", n, "(expected 2)")
-              if n != 2:
+              print("gspawn.c libproc replacements:", n, "(expected 3)")
+              if n != 3:
                   sys.exit("gspawn.c layout changed - libproc patch did not apply")
           else:
               sys.exit("gspawn.c not found at " + gs)
