@@ -748,6 +748,42 @@ jobs:
           subprocess.run(["tar", "-x", "-C", str(ov)], input=tar, check=True)
           pf = ov / "portfile.cmake"
           s = pf.read_text()
+          helper = r"""
+          import sys
+          path, prefix = sys.argv[1], sys.argv[2]
+          s = open(path, encoding="utf-8").read()
+          if "DukeX intl override" in s:
+              sys.exit(0)
+          i = s.index("project(")
+          j = i + len("project")
+          depth = 0
+          quote = None
+          while j < len(s):
+              c = s[j]
+              if quote:
+                  if c == quote:
+                      quote = None
+              elif c in "'\"":
+                  quote = c
+              elif c == "(":
+                  depth += 1
+              elif c == ")":
+                  depth -= 1
+                  if depth == 0:
+                      break
+              j += 1
+          inject = (
+              "\n\n# DukeX intl override: meson CMake/system probes cannot find vcpkg static libintl (iOS cross).\n"
+              "meson.override_dependency('intl', declare_dependency(\n"
+              "  compile_args: ['-I%s/include'],\n"
+              "  link_args: ['-L%s/lib', '-L%s/debug/lib', '-lintl', '-liconv', '-lcharset', '-Wl,-framework,CoreFoundation'],\n"
+              "))\n" % (prefix, prefix, prefix)
+          )
+          s = s[:j + 1] + inject + s[j + 1:]
+          open(path, "w", encoding="utf-8").write(s)
+          """
+          pathlib.Path(os.path.expanduser("~/glib_intl_patch.py")).write_text(helper)
+
           hack = """
           # --- DukeX: iOS cross build ---
           # glib's gnulib check for frexpl() RUNS a test binary. An iOS arm64 binary cannot run on the
@@ -757,20 +793,16 @@ jobs:
               vcpkg_replace_string("${SOURCE_PATH}/glib/gnulib/meson.build"
                   "error(${_q}frexpl()" "warning(${_q}frexpl()" IGNORE_UNCHANGED)
           endforeach()
-          # glib asks meson for dependency('intl'). vcpkg's static gettext-libintl ships no .pc file and
-          # meson's cmake/system probes do not work in this iOS cross setup, so provide one.
-          # (libintl on Apple platforms also needs libiconv, libcharset and CoreFoundation.)
-          foreach(_cfg "" "debug/")
-              file(WRITE "${CURRENT_INSTALLED_DIR}/${_cfg}lib/pkgconfig/intl.pc"
-          "prefix=${CURRENT_INSTALLED_DIR}/${_cfg}\n"
-          "libdir=\\${prefix}/lib\n"
-          "includedir=${CURRENT_INSTALLED_DIR}/include\n"
-          "Name: intl\n"
-          "Description: GNU libintl (vcpkg, iOS)\n"
-          "Version: 0.22.5\n"
-          "Libs: -L\\${libdir} -lintl -liconv -lcharset -Wl,-framework,CoreFoundation\n"
-          "Cflags: -I\\${includedir}\n")
-          endforeach()
+          # glib asks meson for dependency('intl'). In an iOS cross build meson's CMake probe fails
+          # (empty VCPKG_TARGET_ARCHITECTURE in its sandbox) and the builtin/system probes find
+          # nothing, so inject an explicit override right after project() in glib's meson.build.
+          execute_process(
+              COMMAND python3 "$ENV{HOME}/glib_intl_patch.py"
+                      "${SOURCE_PATH}/meson.build" "${CURRENT_INSTALLED_DIR}"
+              RESULT_VARIABLE _dukex_rc)
+          if(NOT _dukex_rc EQUAL 0)
+              message(FATAL_ERROR "DukeX: glib intl patch failed (${_dukex_rc})")
+          endif()
           # --- end DukeX ---
 
           """
