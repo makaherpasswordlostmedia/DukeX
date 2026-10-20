@@ -35,10 +35,10 @@ on:
         required: false
         default: "v1.3.0"
         type: string
-      glib_version:
-        description: "glib version pinned via vcpkg manifest override (2.90 fails its frexpl check on iOS cross builds)"
+      glib_max_version:
+        description: "Newest glib to allow (picked automatically from the vcpkg version database; glib 2.90 fails its frexpl check on iOS cross builds)"
         required: false
-        default: "2.82.2"
+        default: "2.82"
         type: string
 
 permissions:
@@ -692,13 +692,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: vcpkg-arm64-ios14-${{ hashFiles('.github/workflows/ios14-build.yml') }}-${{ inputs.glib_version }}
+          key: vcpkg-arm64-ios14-${{ hashFiles('.github/workflows/ios14-build.yml') }}-${{ inputs.glib_max_version }}
           restore-keys: vcpkg-arm64-ios14-
 
       - name: vcpkg arm64-ios dependencies (deployment target 14.0)
         if: inputs.stage == 'full-ipa'
         env:
-          GLIB_VERSION: ${{ inputs.glib_version }}
+          GLIB_MAX: ${{ inputs.glib_max_version }}
         run: |
           set -uo pipefail
           mkdir -p logs "$HOME/.cache/vcpkg/archives"
@@ -721,31 +721,43 @@ jobs:
           TRIPLET
           sed -i '' -E 's/^ {10}//' "$HOME/triplets/arm64-ios.cmake"
 
-          # Manifest: libepoxy WITHOUT default features (the egl/x11 features do not build on
-          # iOS; xemu only needs epoxy's GL headers/dispatch, rendering goes through Vulkan),
-          # glib pinned to a version whose gnulib frexpl probe works in iOS cross builds.
+          # Manifest: libepoxy WITHOUT default features (egl/x11 do not build on iOS; xemu only
+          # needs epoxy's GL headers, rendering goes through Vulkan/MoltenVK). glib is pinned to
+          # the newest version <= GLIB_MAX found in vcpkg's own version database, including its
+          # port-version (entries look like 2.82.2#1).
           mkdir -p "$HOME/manifest"
-          cat > "$HOME/manifest/vcpkg.json" <<EOF
-          {
-            "name": "dukex-ios-deps",
-            "version": "0.0.0",
-            "builtin-baseline": "${BASELINE}",
-            "dependencies": [
-              "zlib",
-              "libpng",
-              "pixman",
-              "glib",
-              "libsamplerate",
-              { "name": "libepoxy", "default-features": false },
-              "sdl3",
-              "curl"
-            ],
-            "overrides": [
-              { "name": "glib", "version": "${GLIB_VERSION}" }
-            ]
+          BASELINE="$BASELINE" GLIB_MAX="$GLIB_MAX" python3 - <<'PY'
+          import json, os, re
+          root = os.path.expanduser("~/vcpkg")
+          path = os.path.join(root, "versions", "g-", "glib.json")
+          entries = json.load(open(path))["versions"]
+          def ver(e):
+              return e.get("version") or e.get("version-semver") or e.get("version-string") or e.get("version-date")
+          def key(v):
+              return tuple(int(x) for x in re.findall(r"\d+", v.split("-")[0])[:3])
+          limit = tuple(int(x) for x in os.environ["GLIB_MAX"].split("."))
+          print("glib versions in database (newest first):", [f"{ver(e)}#{e.get('port-version', 0)}" for e in entries[:14]])
+          chosen = next((e for e in entries if key(ver(e))[:len(limit)] <= limit), None)
+          if chosen is None:
+              raise SystemExit("no glib <= %s in the vcpkg version database" % os.environ["GLIB_MAX"])
+          override = {"name": "glib", "version": ver(chosen)}
+          if chosen.get("port-version", 0):
+              override["port-version"] = chosen["port-version"]
+          print("glib override:", override)
+          manifest = {
+              "name": "dukex-ios-deps",
+              "version": "0.0.0",
+              "builtin-baseline": os.environ["BASELINE"],
+              "dependencies": [
+                  "zlib", "libpng", "pixman", "glib", "libsamplerate",
+                  {"name": "libepoxy", "default-features": False},
+                  "sdl3", "curl",
+              ],
+              "overrides": [override],
           }
-          EOF
-          sed -i '' -E 's/^ {10}//' "$HOME/manifest/vcpkg.json"
+          json.dump(manifest, open(os.path.expanduser("~/manifest/vcpkg.json"), "w"), indent=2)
+          PY
+          sed -i '' -E 's/^ {10}//' "$HOME/manifest/vcpkg.json" 2>/dev/null || true
           cat "$HOME/manifest/vcpkg.json"
 
           export VCPKG_DEFAULT_BINARY_CACHE="$HOME/.cache/vcpkg/archives"
