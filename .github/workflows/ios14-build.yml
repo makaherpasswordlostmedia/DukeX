@@ -757,6 +757,20 @@ jobs:
               vcpkg_replace_string("${SOURCE_PATH}/glib/gnulib/meson.build"
                   "error(${_q}frexpl()" "warning(${_q}frexpl()" IGNORE_UNCHANGED)
           endforeach()
+          # glib asks meson for dependency('intl'). vcpkg's static gettext-libintl ships no .pc file and
+          # meson's cmake/system probes do not work in this iOS cross setup, so provide one.
+          # (libintl on Apple platforms also needs libiconv, libcharset and CoreFoundation.)
+          foreach(_cfg "" "debug/")
+              file(WRITE "${CURRENT_INSTALLED_DIR}/${_cfg}lib/pkgconfig/intl.pc"
+          "prefix=${CURRENT_INSTALLED_DIR}/${_cfg}\n"
+          "libdir=\\${prefix}/lib\n"
+          "includedir=${CURRENT_INSTALLED_DIR}/include\n"
+          "Name: intl\n"
+          "Description: GNU libintl (vcpkg, iOS)\n"
+          "Version: 0.22.5\n"
+          "Libs: -L\\${libdir} -lintl -liconv -lcharset -Wl,-framework,CoreFoundation\n"
+          "Cflags: -I\\${includedir}\n")
+          endforeach()
           # --- end DukeX ---
 
           """
