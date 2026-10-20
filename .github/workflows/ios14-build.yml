@@ -786,6 +786,29 @@ jobs:
               print("gnulib error->warning replacements:", count)
           else:
               print("gnulib meson.build not found at", gn)
+
+          # gspawn.c: <libproc.h> (proc_pidinfo) exists in the macOS SDK only, not in iPhoneOS.sdk.
+          # It is just an fd-enumeration shortcut inside safe_fdwalk(); the plain
+          # "for fd < open_max" loop right below it is the portable fallback, so compile the
+          # libproc branch out on iOS.
+          gs = os.path.join(os.path.dirname(path), "glib", "gspawn.c")
+          if os.path.exists(gs):
+              t = open(gs, encoding="utf-8").read()
+              n = 0
+              a = "#include <libproc.h>"
+              if a in t:
+                  t = t.replace(a, "#include <TargetConditionals.h>\n#if !TARGET_OS_IPHONE\n#include <libproc.h>\n#endif")
+                  n += 1
+              b = "#if defined(__APPLE__)\n  /* proc_pidinfo isn't documented"
+              if b in t:
+                  t = t.replace(b, "#if defined(__APPLE__) && !TARGET_OS_IPHONE\n  /* proc_pidinfo isn't documented")
+                  n += 1
+              open(gs, "w", encoding="utf-8").write(t)
+              print("gspawn.c libproc replacements:", n, "(expected 2)")
+              if n != 2:
+                  sys.exit("gspawn.c layout changed - libproc patch did not apply")
+          else:
+              sys.exit("gspawn.c not found at " + gs)
           """
           pathlib.Path(os.path.expanduser("~/glib_intl_patch.py")).write_text(helper)
 
