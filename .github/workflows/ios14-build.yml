@@ -763,6 +763,29 @@ jobs:
           ) % (prefix, prefix, prefix)
           open(os.path.join(sub, "meson.build"), "w", encoding="utf-8").write(text)
           print("proxy-libintl stub written to", sub)
+
+          # gnulib: turn the "... missing or broken beyond repair" errors into warnings. Those probes
+          # RUN test binaries, which is impossible for an iOS arm64 binary on the macOS build host.
+          gn = os.path.join(os.path.dirname(path), "glib", "gnulib", "meson.build")
+          if os.path.exists(gn):
+              g = open(gn, encoding="utf-8").read()
+              phrase = "missing or broken beyond repair"
+              count = 0
+              pos = 0
+              while True:
+                  k = g.find(phrase, pos)
+                  if k < 0:
+                      break
+                  e = g.rfind("error", 0, k)
+                  if e >= 0 and g[e:e + 5] == "error" and not g[e - 1:e].isalnum():
+                      g = g[:e] + "warning" + g[e + 5:]
+                      k += 2
+                      count += 1
+                  pos = k + len(phrase)
+              open(gn, "w", encoding="utf-8").write(g)
+              print("gnulib error->warning replacements:", count)
+          else:
+              print("gnulib meson.build not found at", gn)
           """
           pathlib.Path(os.path.expanduser("~/glib_intl_patch.py")).write_text(helper)
 
