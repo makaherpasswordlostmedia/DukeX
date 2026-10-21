@@ -914,6 +914,21 @@ jobs:
         run: |
           set -eo pipefail
           export XEMU_IOS_VCPKG_PREFIX="$VCPKG_ROOT/installed/arm64-ios"
+          # xemu's meson.build requires dependency('libpcap') via pkg-config, and vcpkg has no
+          # usable libpcap for iOS. The iPhoneOS SDK ships libpcap (usr/include/pcap + libpcap.tbd),
+          # so publish a libpcap.pc that points at it. build-core-ios.sh already searches this
+          # prefix's lib/pkgconfig. (Network capture is never used on iOS at runtime.)
+          SDKROOT_PCAP="$(xcrun --sdk iphoneos --show-sdk-path)"
+          ls "$SDKROOT_PCAP/usr/include/pcap/pcap.h" "$SDKROOT_PCAP"/usr/lib/libpcap* \
+            || echo "::warning::iPhoneOS SDK has no libpcap header/library - xemu link/compile will fail"
+          mkdir -p "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig"
+          cat > "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig/libpcap.pc" <<'PCEOF'
+          Name: libpcap
+          Description: libpcap from the iPhoneOS SDK
+          Version: 1.10.1
+          Libs: -lpcap
+          Cflags:
+          PCEOF
           chmod +x ios/scripts/*.sh
           set +e
           ios/scripts/build-core-ios.sh 2>&1 | tee logs/core.log
