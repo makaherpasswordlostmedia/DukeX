@@ -650,6 +650,41 @@ jobs:
           PY
           grep -n -B1 -A3 "respondsToSelector:@selector(setDeveloperHUDProperties" ui/xemu-os-utils-ios.m
 
+      - name: iOS runtime fix - 4-byte aligned vertex strides for Metal (nv2a Vulkan)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          p = "hw/xbox/nv2a/pgraph/vk/draw.c"
+          t = open(p, encoding="utf-8").read()
+          if "DukeX: Metal needs 4-byte" in t:
+              print("already patched")
+              sys.exit(0)
+          edits = [
+              ("        VkDeviceSize new_stride;\n    } map[",
+               "        VkDeviceSize new_stride;\n        VkDeviceSize copy_size;\n    } map["),
+              ("bool stride_valid = (desc->stride % element_size == 0);",
+               "/* DukeX: Metal needs 4-byte aligned vertex strides (MoltenVK: \"vertex attribute\n"
+               "         * binding strides must be aligned to 4 bytes\"), so also remap those. */\n"
+               "        bool stride_valid = (desc->stride % element_size == 0) &&\n"
+               "                            (desc->stride % 4 == 0);"),
+              ("remap.map[attr_id].offset = ROUND_UP(output_offset, element_size);",
+               "remap.map[attr_id].offset = ROUND_UP(output_offset, MAX(element_size, 4));"),
+              ("remap.map[attr_id].new_stride = element_size * element_count;",
+               "remap.map[attr_id].copy_size = element_size * element_count;\n"
+               "        remap.map[attr_id].new_stride = ROUND_UP(remap.map[attr_id].copy_size, 4);"),
+              ("memcpy(out_ptr, in_ptr, remap.map[attr_id].new_stride);",
+               "memcpy(out_ptr, in_ptr, remap.map[attr_id].copy_size);"),
+          ]
+          for old, new in edits:
+              if t.count(old) != 1:
+                  sys.exit("draw.c layout changed - stride patch did not apply: " + old[:50])
+              t = t.replace(old, new)
+          open(p, "w", encoding="utf-8").write(t)
+          print("patched vertex stride alignment in", p)
+          PY
+          grep -n "copy_size\|% 4 == 0" hw/xbox/nv2a/pgraph/vk/draw.c
+
       - name: Select Xcode
         run: |
           set -e
