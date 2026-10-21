@@ -914,21 +914,70 @@ jobs:
         run: |
           set -eo pipefail
           export XEMU_IOS_VCPKG_PREFIX="$VCPKG_ROOT/installed/arm64-ios"
-          # xemu's meson.build requires dependency('libpcap') via pkg-config, and vcpkg has no
-          # usable libpcap for iOS. The iPhoneOS SDK ships libpcap (usr/include/pcap + libpcap.tbd),
-          # so publish a libpcap.pc that points at it. build-core-ios.sh already searches this
-          # prefix's lib/pkgconfig. (Network capture is never used on iOS at runtime.)
+          # xemu's meson.build requires dependency('libpcap') via pkg-config, vcpkg has no libpcap
+          # for iOS and the iPhoneOS SDK ships neither header nor library. Live packet capture can
+          # never work inside the iOS sandbox anyway, so build a tiny stub libpcap (the subset of
+          # the API that net/pcap.c and ui/xui/main-menu.cc use) and publish it via libpcap.pc.
+          PCAPSTUB="$HOME/pcap-stub"
+          rm -rf "$PCAPSTUB"; mkdir -p "$PCAPSTUB/include/pcap" "$PCAPSTUB/lib"
+          sed 's/^    //' > "$PCAPSTUB/include/pcap/pcap.h" <<'PCAPH'
+              #ifndef DUKEX_IOS_PCAP_STUB_H
+              #define DUKEX_IOS_PCAP_STUB_H
+              #include <sys/types.h>
+              #include <sys/time.h>
+              #ifdef __cplusplus
+              extern "C" {
+              #endif
+              #define PCAP_ERRBUF_SIZE 256
+              #define DLT_EN10MB 1
+              typedef unsigned int bpf_u_int32;
+              typedef struct pcap pcap_t;
+              struct pcap_pkthdr { struct timeval ts; bpf_u_int32 caplen; bpf_u_int32 len; };
+              struct pcap_addr;
+              typedef struct pcap_if {
+                  struct pcap_if *next;
+                  char *name;
+                  char *description;
+                  struct pcap_addr *addresses;
+                  bpf_u_int32 flags;
+              } pcap_if_t;
+              pcap_t *pcap_open_live(const char *device, int snaplen, int promisc, int to_ms, char *errbuf);
+              void pcap_close(pcap_t *p);
+              int pcap_sendpacket(pcap_t *p, const u_char *buf, int size);
+              int pcap_next_ex(pcap_t *p, struct pcap_pkthdr **hdr, const u_char **data);
+              char *pcap_geterr(pcap_t *p);
+              int pcap_set_datalink(pcap_t *p, int dlt);
+              int pcap_get_selectable_fd(pcap_t *p);
+              int pcap_findalldevs(pcap_if_t **alldevsp, char *errbuf);
+              void pcap_freealldevs(pcap_if_t *alldevs);
+              #ifdef __cplusplus
+              }
+              #endif
+              #endif
+          PCAPH
+          sed 's/^    //' > "$PCAPSTUB/pcap_stub.c" <<'PCAPC'
+              #include <pcap/pcap.h>
+              #include <stdio.h>
+              #include <stddef.h>
+              static void fail(char *errbuf) { if (errbuf) snprintf(errbuf, PCAP_ERRBUF_SIZE, "packet capture is not available on iOS"); }
+              pcap_t *pcap_open_live(const char *d, int s, int p, int t, char *e) { (void)d; (void)s; (void)p; (void)t; fail(e); return NULL; }
+              void pcap_close(pcap_t *p) { (void)p; }
+              int pcap_sendpacket(pcap_t *p, const u_char *b, int n) { (void)p; (void)b; (void)n; return -1; }
+              int pcap_next_ex(pcap_t *p, struct pcap_pkthdr **h, const u_char **d) { (void)p; (void)h; (void)d; return -1; }
+              char *pcap_geterr(pcap_t *p) { (void)p; return (char *)"packet capture is not available on iOS"; }
+              int pcap_set_datalink(pcap_t *p, int dlt) { (void)p; (void)dlt; return -1; }
+              int pcap_get_selectable_fd(pcap_t *p) { (void)p; return -1; }
+              int pcap_findalldevs(pcap_if_t **a, char *e) { if (a) *a = NULL; fail(e); return -1; }
+              void pcap_freealldevs(pcap_if_t *a) { (void)a; }
+          PCAPC
           SDKROOT_PCAP="$(xcrun --sdk iphoneos --show-sdk-path)"
-          ls "$SDKROOT_PCAP/usr/include/pcap/pcap.h" "$SDKROOT_PCAP"/usr/lib/libpcap* \
-            || echo "::warning::iPhoneOS SDK has no libpcap header/library - xemu link/compile will fail"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios14.0 -isysroot "$SDKROOT_PCAP" \
+            -I"$PCAPSTUB/include" -fPIC -O1 -Wall -Werror -c "$PCAPSTUB/pcap_stub.c" -o "$PCAPSTUB/pcap_stub.o"
+          xcrun --sdk iphoneos libtool -static -o "$PCAPSTUB/lib/libpcap.a" "$PCAPSTUB/pcap_stub.o"
           mkdir -p "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig"
-          cat > "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig/libpcap.pc" <<'PCEOF'
-          Name: libpcap
-          Description: libpcap from the iPhoneOS SDK
-          Version: 1.10.1
-          Libs: -lpcap
-          Cflags:
-          PCEOF
+          printf 'Name: libpcap\nDescription: stub libpcap for iOS (no capture support)\nVersion: 1.10.1\nLibs: -L%s/lib -lpcap\nCflags: -I%s/include\n' \
+            "$PCAPSTUB" "$PCAPSTUB" > "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig/libpcap.pc"
+          cat "$XEMU_IOS_VCPKG_PREFIX/lib/pkgconfig/libpcap.pc"
           chmod +x ios/scripts/*.sh
           set +e
           ios/scripts/build-core-ios.sh 2>&1 | tee logs/core.log
