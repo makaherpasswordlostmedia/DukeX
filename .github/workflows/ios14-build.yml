@@ -843,6 +843,20 @@ jobs:
           pf.write_text(s[:i] + hack + s[i:])
           print("overlay port ready:", sorted(x.name for x in ov.iterdir()))
 
+          # libepoxy: vcpkg only disables GLX/EGL for Windows and macOS, so on iOS it builds the
+          # X11/EGL dispatch code and fails ("unknown type name 'EGLDisplay'"). iOS has neither,
+          # so treat it like macOS (-Dglx=no -Degl=no -Dx11=false).
+          import shutil
+          epx = pathlib.Path(os.path.expanduser("~/overlay-ports/libepoxy"))
+          shutil.copytree(os.path.join(root, "ports", "libepoxy"), str(epx), dirs_exist_ok=True)
+          epf = epx / "portfile.cmake"
+          et = epf.read_text()
+          eold = "if (VCPKG_TARGET_IS_WINDOWS OR VCPKG_TARGET_IS_OSX)"
+          if eold not in et:
+              raise SystemExit("libepoxy portfile layout changed - iOS patch did not apply")
+          epf.write_text(et.replace(eold, "if (VCPKG_TARGET_IS_WINDOWS OR VCPKG_TARGET_IS_OSX OR VCPKG_TARGET_IS_IOS)"))
+          print("libepoxy overlay port ready")
+
           manifest = {
               "name": "dukex-ios-deps",
               "version": "0.0.0",
