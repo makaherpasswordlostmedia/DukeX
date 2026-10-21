@@ -626,6 +626,30 @@ jobs:
           grep -n 'IOS_DEPLOYMENT_TARGET:-' ios/scripts/build-core-ios.sh
           grep -c "iOS14Compat.swift" ios/DukeX/DukeX.xcodeproj/project.pbxproj
 
+      - name: iOS 14 runtime fix - guard CAMetalLayer developer HUD (ObjC core)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          p = "ui/xemu-os-utils-ios.m"
+          t = open(p, encoding="utf-8").read()
+          old = "    layer.developerHUDProperties = properties;\n"
+          new = ("    /* developerHUDProperties exists on iOS 16+ only; on iOS 14/15 the setter\n"
+                 "     * is an unrecognized selector and aborts the whole app. */\n"
+                 "    if (![layer respondsToSelector:@selector(setDeveloperHUDProperties:)]) {\n"
+                 "        return;\n"
+                 "    }\n"
+                 "    layer.developerHUDProperties = properties;\n")
+          if new in t:
+              print("already guarded")
+          elif t.count(old) == 1:
+              open(p, "w", encoding="utf-8").write(t.replace(old, new))
+              print("guarded developerHUDProperties in", p)
+          else:
+              sys.exit("xemu-os-utils-ios.m layout changed - HUD guard did not apply")
+          PY
+          grep -n -B1 -A3 "respondsToSelector:@selector(setDeveloperHUDProperties" ui/xemu-os-utils-ios.m
+
       - name: Select Xcode
         run: |
           set -e
